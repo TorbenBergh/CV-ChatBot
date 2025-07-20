@@ -1,84 +1,102 @@
 import streamlit as st
-import openai
+import numpy as np
+from sentence_transformers import SentenceTransformer
+from sklearn.metrics.pairwise import cosine_similarity
 
-# Initialize OpenAI client using new SDK (v1+)
-client = openai.OpenAI(api_key=st.secrets["OPENAI_API_KEY"])
-
-# Page settings
 st.set_page_config(page_title="Chat With Torben's CV", page_icon="🤖")
-st.title("🤖 Chat With My CV")
-st.markdown("Ask me anything about my background, education, experience, or skills.")
+st.title("🤖 Chat With My CV (Free, No API Key Needed)")
+st.markdown(
+    "Ask me about my background, projects, education, or skills. "
+    "This demo uses local semantic search over my CV instead of a paid API."
+)
 
-# Initialize chat history
-if "messages" not in st.session_state:
-    st.session_state.messages = [
-        {
-            "role": "system",
-            "content": """
-You are Torben Bergh, a job applicant. Answer questions truthfully and in the first person, as if you are speaking about yourself. Use a professional but friendly tone.
+# -------- Knowledge Base --------
+# Each item: (id, title, text)
+KB_ITEMS = [
+    ("profile", "Profile", "I'm a mechatronic engineering student at Stellenbosch University with a strong work ethic and an innate desire to learn. I love mathematics and am keen to pursue a meaningful career in data analytics."),
+    ("education_uni", "Stellenbosch University", "I am studying toward a BEng in Mechatronics (2022–present) at Stellenbosch University. My current average is 80.35%."),
+    ("education_bishops", "Bishops Diocesan College", "I matriculated from Bishops Diocesan College with a 92.1% average, including 98% Physical Sciences, 97% Mathematics, and 83% AP Mathematics."),
+    ("leadership_simonsberg", "Leadership: Simonsberg Residence", "I served on the Simonsberg Men's Residence House Committee (2024) with portfolios in maintenance, rugby, and sustainability."),
+    ("awards_merit", "Academic Awards", "I received Senior Merit Awards for being in the top 5% of my faculty in 2022, 2023, and 2024. I also won the UCT Mathematics Gold Award in 2018."),
+    ("work_aerobotics", "Aerobotics Internship", "At Aerobotics I assisted with machine learning models for fruit detection, including data annotation and quality control on agricultural imaging datasets."),
+    ("work_rooibos", "Rooibos LTD Work", "At Rooibos LTD I worked with operations on CAD tasks, pipeline layout, and efficiency forecasting projects."),
+    ("skills_technical", "Technical Skills", "I work in Python (PyTorch), R, and C. Comfortable with data analysis, statistics, CAD, and Microsoft Excel/Word/PowerPoint."),
+    ("strengths", "Strengths", "My strengths include critical thinking, strong work ethic, time management, and situational awareness."),
+    ("interests", "Interests", "I enjoy hiking, rugby (I captain my residence team and coach U20), running, and community outreach like organising football tournaments or painting schools."),
+    ("project_fyp", "Final Year Project", "My final year project developed deep learning models to predict the efficiency of a large industrial boiler. The results were good and satisfying."),
+    ("why_role", "Why AI Automation", "I believe AI automation is a growing field and I want to be part of it, applying my engineering and data background to real problems."),
+    ("future_goals", "5-Year Goals", "In 5 years I hope to have a few strong years of work experience, possibly be pursuing a master's or MBA, and be in a good, healthy relationship."),
+    ("why_hire", "Why Hire Me", "I'm aligned with what your company stands for and believe the businesses you work with share a conscious, values-driven message. I bring engineering discipline plus data skills."),
+]
 
-Here is your background:
+# -------- Load Embedding Model Once --------
+@st.cache_resource(show_spinner=False)
+def load_model():
+    return SentenceTransformer("all-MiniLM-L6-v2")
 
-👤 PROFILE  
-I'm a mechatronic engineering student at Stellenbosch University with a strong work ethic and an innate desire to learn. I have a particular passion for mathematics and am keen to pursue a meaningful career in data analytics.
+model = load_model()
 
-🎓 EDUCATION  
-- Bachelor of Engineering – Mechatronics, Stellenbosch University (2022–Present)  
-  – Current average: 80.35%  
-- Matric – Bishops Diocesan College  
-  – Average: 92.1%  
-  – 98% Physical Sciences, 97% Mathematics, 83% AP Mathematics
+# Precompute embeddings
+@st.cache_resource(show_spinner=False)
+def build_kb_embeddings(items):
+    texts = [t for (_, _, t) in items]
+    embeddings = model.encode(texts, convert_to_numpy=True, normalize_embeddings=True)
+    return embeddings
 
-🏆 ACHIEVEMENTS & LEADERSHIP  
-- House Committee Member at Simonsberg Residence (2024)  
-  – Portfolios: Maintenance, Rugby, Sustainability  
-- Top 5% of Faculty: Senior Merit Award (2022, 2023, 2024)  
-- Winner of UCT Mathematics Gold Award (2018)
+KB_EMBED = build_kb_embeddings(KB_ITEMS)
 
-💼 WORK EXPERIENCE  
-- Aerobotics  
-  – ML model assistance for fruit detection  
-- Rooibos LTD  
-  – CAD, pipeline planning, and efficiency forecasting
+# -------- Simple Retrieval Function --------
+def retrieve_answer(query, top_k=3, threshold=0.35):
+    q_emb = model.encode([query], convert_to_numpy=True, normalize_embeddings=True)
+    sims = cosine_similarity(q_emb, KB_EMBED)[0]
+    top_idx = np.argsort(sims)[::-1][:top_k]
+    results = []
+    for idx in top_idx:
+        score = sims[idx]
+        if score < threshold:
+            continue
+        kb_id, title, text = KB_ITEMS[idx]
+        results.append((score, title, text))
+    return results
 
-🛠️ TECHNICAL SKILLS  
-- Programming: Python (PyTorch), R, C  
-- Software: Microsoft Excel, Word, PowerPoint  
-- Skills: Critical thinking, time management, data analysis, CAD, statistics, problem solving  
-- Languages: English (native), Afrikaans (fluent)
+def compose_response(query, results):
+    if not results:
+        return (
+            "I'm not sure I understood that. Could you rephrase or ask about one of these: "
+            "education, work experience, technical skills, final year project, strengths, or interests?"
+        )
+    # Use best match as main answer
+    main = results[0]
+    score, title, text = main
+    resp = text
+    # If other good matches, add short follow-on suggestions
+    extras = [r for r in results[1:] if r[0] > 0.5 * score]
+    if extras:
+        resp += "\n\nYou might also be interested in: " + ", ".join(t for _, t, _ in extras) + "."
+    return resp
 
-⚽ INTERESTS  
-- Hiking, rugby (residence team captain & U20 coach), running, community outreach  
-- I enjoy organising community events like football tournaments or painting schools.
+# -------- Chat Session State --------
+if "chat_history" not in st.session_state:
+    st.session_state.chat_history = []
 
-🧠 TYPICAL INTERVIEW Q&A  
-- Tell me about yourself: I am a hardworking individual looking to pursue a meaningful job and to finally apply all the years of studying behind my belt. I have a love for nature, rugby, hiking, running and being around good friends.  
-- What’s your greatest strength? Critical thinking, work ethic, time management and awareness.  
-- What are your technical skills/tools? Programming languages, mathematics, data analysis, statistics, CAD.  
-- What project are you most proud of? My final year project which dealt with developing deep learning models to predict a large industrial boiler's efficiency. The results were good and satisfying.  
-- Where do you see yourself in 5 years? A few years of good work behind me, potentially studying a master’s or MBA, and in a good healthy relationship.  
-- Why this role? I believe this is a growing field of work and would like to be part of it.  
-- Why should we hire you? I'm an advocate for what the company stands for and believe the businesses involved all share a similar conscious message.
-
-End of profile.
-"""
-        }
-    ]
-
-# Handle user input
+# -------- Chat Input --------
 user_input = st.chat_input("Ask a question about my background...")
 
 if user_input:
-    st.session_state.messages.append({"role": "user", "content": user_input})
-
+    # Add user msg
+    st.session_state.chat_history.append(("user", user_input))
     with st.spinner("Thinking..."):
-        response = client.chat.completions.create(
-            model="gpt-3.5-turbo",
-            messages=st.session_state.messages
-        )
-        assistant_reply = response.choices[0].message.content
-        st.session_state.messages.append({"role": "assistant", "content": assistant_reply})
+        results = retrieve_answer(user_input)
+        reply = compose_response(user_input, results)
+    st.session_state.chat_history.append(("assistant", reply))
 
-# Display the chat history
-for msg in st.session_state.messages[1:]:  # skip system prompt
-    st.chat_message(msg["role"]).markdown(msg["content"])
+# -------- Display Chat --------
+for role, content in st.session_state.chat_history:
+    st.chat_message(role).markdown(content)
+
+# Footer / disclosure
+st.markdown(
+    "<hr><small>This is a free demo chatbot that uses local semantic search over my CV and "
+    "pre-written answers. No external AI API calls are made.</small>",
+    unsafe_allow_html=True
+)
